@@ -3,12 +3,16 @@ from tkinter import ttk, messagebox, simpledialog
 import json
 import os
 from datetime import datetime
+from win10toast import ToastNotifier
 
 class TodoApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ToDo アプリ")
         self.root.geometry("600x500")
+        
+        # Windows通知の初期化
+        self.toaster = ToastNotifier()
         
         # タスクリスト
         self.tasks = []
@@ -229,6 +233,11 @@ class TodoApp:
         self.save_tasks()
         self.display_tasks()
         
+        # 通知
+        notification_title = "新しいタスクが追加されました"
+        notification_message = f"タスク: {title}\nカテゴリ: {category}\n優先度: {priority}"
+        self.toaster.show_toast(notification_title, notification_message, duration=5, threaded=True)
+        
         # 入力欄のクリア
         self.task_entry.delete(0, tk.END)
 
@@ -241,8 +250,20 @@ class TodoApp:
             
         if messagebox.askyesno("確認", "選択したタスクを削除しますか？"):
             for item in selected_items:
-                task_id = self.tree.item(item, 'values')[0]
-                self.tasks = [task for task in self.tasks if task['id'] != task_id]
+                values = self.tree.item(item, 'values')
+                task_id = int(values[0])  # 文字列から整数に変換
+                task_title = values[1]
+                
+                # 該当するタスクを削除
+                for i, task in enumerate(self.tasks):
+                    if task['id'] == task_id:
+                        del self.tasks[i]
+                        
+                        # 通知
+                        notification_title = "タスクが削除されました"
+                        notification_message = f"タスク「{task_title}」を削除しました。"
+                        self.toaster.show_toast(notification_title, notification_message, duration=5, threaded=True)
+                        break
                 
             self.save_tasks()
             self.display_tasks()
@@ -256,10 +277,22 @@ class TodoApp:
             
         for item in selected_items:
             task_id = self.tree.item(item, 'values')[0]
+            task_title = self.tree.item(item, 'values')[1]
             for task in self.tasks:
                 if task['id'] == task_id:
                     # ステータスの切り替え
-                    task['status'] = 'completed' if task['status'] == 'active' else 'active'
+                    new_status = 'completed' if task['status'] == 'active' else 'active'
+                    task['status'] = new_status
+                    
+                    # 通知
+                    if new_status == 'completed':
+                        notification_title = "タスクが完了しました"
+                        notification_message = f"タスク「{task_title}」を完了しました。"
+                    else:
+                        notification_title = "タスクが未完了に戻されました"
+                        notification_message = f"タスク「{task_title}」を未完了に戻しました。"
+                        
+                    self.toaster.show_toast(notification_title, notification_message, duration=5, threaded=True)
                     break
                     
         self.save_tasks()
