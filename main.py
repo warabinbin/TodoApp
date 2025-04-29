@@ -2,13 +2,19 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+import threading
+import time
+from win10toast import ToastNotifier
 
 class TodoApp:
     def __init__(self, root):
         self.root = root
         self.root.title("ToDo アプリ")
         self.root.geometry("600x500")
+        
+        # Windows通知の初期化
+        self.toaster = ToastNotifier()
         
         # タスクリスト
         self.tasks = []
@@ -24,6 +30,15 @@ class TodoApp:
         
         # UIの設定
         self.setup_ui()
+        
+        # リマインダースレッド
+        self.reminder_active = True
+        self.reminder_thread = threading.Thread(target=self.check_reminders)
+        self.reminder_thread.daemon = True
+        self.reminder_thread.start()
+        
+        # クローズ時の処理
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def setup_ui(self):
         # フレームの作成
@@ -59,10 +74,11 @@ class TodoApp:
         ttk.Button(button_frame, text="追加", command=self.add_task).grid(row=0, column=0, padx=5, pady=5)
         ttk.Button(button_frame, text="削除", command=self.delete_task).grid(row=0, column=1, padx=5, pady=5)
         ttk.Button(button_frame, text="完了", command=self.complete_task).grid(row=0, column=2, padx=5, pady=5)
-        ttk.Button(button_frame, text="すべて表示", command=self.show_all_tasks).grid(row=0, column=3, padx=5, pady=5)
-        ttk.Button(button_frame, text="未完了のみ", command=self.show_active_tasks).grid(row=0, column=4, padx=5, pady=5)
-        ttk.Button(button_frame, text="完了済のみ", command=self.show_completed_tasks).grid(row=0, column=5, padx=5, pady=5)
-        ttk.Button(button_frame, text="カテゴリ管理", command=self.manage_categories).grid(row=0, column=6, padx=5, pady=5)
+        ttk.Button(button_frame, text="リマインド設定", command=self.set_reminder).grid(row=0, column=3, padx=5, pady=5)
+        ttk.Button(button_frame, text="すべて表示", command=self.show_all_tasks).grid(row=0, column=4, padx=5, pady=5)
+        ttk.Button(button_frame, text="未完了のみ", command=self.show_active_tasks).grid(row=0, column=5, padx=5, pady=5)
+        ttk.Button(button_frame, text="完了済のみ", command=self.show_completed_tasks).grid(row=0, column=6, padx=5, pady=5)
+        ttk.Button(button_frame, text="カテゴリ管理", command=self.manage_categories).grid(row=0, column=7, padx=5, pady=5)
         
         # フィルター用のフレーム
         filter_frame = ttk.Frame(self.root, padding=10)
@@ -89,7 +105,7 @@ class TodoApp:
         self.filter_priority_combobox.bind("<<ComboboxSelected>>", lambda e: self.apply_filters())
         
         # タスク一覧
-        columns = ('id', 'title', 'category', 'priority', 'status', 'created_at')
+        columns = ('id', 'title', 'category', 'priority', 'status', 'created_at', 'reminder')
         self.tree = ttk.Treeview(list_frame, columns=columns, show='headings')
         
         # 列の設定
@@ -99,13 +115,15 @@ class TodoApp:
         self.tree.heading('priority', text='優先度')
         self.tree.heading('status', text='状態')
         self.tree.heading('created_at', text='作成日時')
+        self.tree.heading('reminder', text='リマインド')
         
-        self.tree.column('id', width=50, anchor=tk.CENTER)
-        self.tree.column('title', width=200)
-        self.tree.column('category', width=80, anchor=tk.CENTER)
-        self.tree.column('priority', width=60, anchor=tk.CENTER)
-        self.tree.column('status', width=60, anchor=tk.CENTER)
-        self.tree.column('created_at', width=120, anchor=tk.CENTER)
+        self.tree.column('id', width=40, anchor=tk.CENTER)
+        self.tree.column('title', width=180)
+        self.tree.column('category', width=70, anchor=tk.CENTER)
+        self.tree.column('priority', width=50, anchor=tk.CENTER)
+        self.tree.column('status', width=50, anchor=tk.CENTER)
+        self.tree.column('created_at', width=100, anchor=tk.CENTER)
+        self.tree.column('reminder', width=100, anchor=tk.CENTER)
         
         # スクロールバー
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -177,13 +195,14 @@ class TodoApp:
                 task['category'],
                 task['priority'],
                 '完了' if task['status'] == 'completed' else '未完了',
-                task['created_at']
+                task['created_at'],
+                task.get('reminder', '未設定')
             ))
             
         # 優先度に応じて行の色を変更
         for item in self.tree.get_children():
             task_id = self.tree.item(item, 'values')[0]
-            task = next((t for t in self.tasks if t['id'] == task_id), None)
+            task = next((t for t in self.tasks if t['id'] == int(task_id)), None)
             if task:
                 if task['priority'] == '高':
                     self.tree.item(item, tags=('high_priority',))
@@ -222,12 +241,18 @@ class TodoApp:
             'category': category,
             'priority': priority,
             'status': 'active',
-            'created_at': now
+            'created_at': now,
+            'reminder': '未設定'
         }
         
         self.tasks.append(task)
         self.save_tasks()
         self.display_tasks()
+        
+        # 通知
+        notification_title = "新しいタスクが追加されました"
+        notification_message = f"タスク: {title}\nカテゴリ: {category}\n優先度: {priority}"
+        self.toaster.show_toast(notification_title, notification_message, duration=5, threaded=True)
         
         # 入力欄のクリア
         self.task_entry.delete(0, tk.END)
@@ -241,8 +266,20 @@ class TodoApp:
             
         if messagebox.askyesno("確認", "選択したタスクを削除しますか？"):
             for item in selected_items:
-                task_id = self.tree.item(item, 'values')[0]
-                self.tasks = [task for task in self.tasks if task['id'] != task_id]
+                values = self.tree.item(item, 'values')
+                task_id = int(values[0])  # 文字列から整数に変換
+                task_title = values[1]
+                
+                # 該当するタスクを削除
+                for i, task in enumerate(self.tasks):
+                    if task['id'] == task_id:
+                        del self.tasks[i]
+                        
+                        # 通知
+                        notification_title = "タスクが削除されました"
+                        notification_message = f"タスク「{task_title}」を削除しました。"
+                        self.toaster.show_toast(notification_title, notification_message, duration=5, threaded=True)
+                        break
                 
             self.save_tasks()
             self.display_tasks()
@@ -255,11 +292,24 @@ class TodoApp:
             return
             
         for item in selected_items:
-            task_id = self.tree.item(item, 'values')[0]
+            values = self.tree.item(item, 'values')
+            task_id = int(values[0])
+            task_title = values[1]
             for task in self.tasks:
                 if task['id'] == task_id:
                     # ステータスの切り替え
-                    task['status'] = 'completed' if task['status'] == 'active' else 'active'
+                    new_status = 'completed' if task['status'] == 'active' else 'active'
+                    task['status'] = new_status
+                    
+                    # 通知
+                    if new_status == 'completed':
+                        notification_title = "タスクが完了しました"
+                        notification_message = f"タスク「{task_title}」を完了しました。"
+                    else:
+                        notification_title = "タスクが未完了に戻されました"
+                        notification_message = f"タスク「{task_title}」を未完了に戻しました。"
+                        
+                    self.toaster.show_toast(notification_title, notification_message, duration=5, threaded=True)
                     break
                     
         self.save_tasks()
@@ -377,6 +427,106 @@ class TodoApp:
         
         self.save_tasks()
         self.display_tasks()
+        
+    def on_close(self):
+        # アプリケーション終了時の処理
+        self.reminder_active = False  # リマインダースレッドを停止
+        self.root.destroy()
+        
+    def set_reminder(self):
+        # リマインドを設定
+        selected_items = self.tree.selection()
+        if not selected_items:
+            messagebox.showwarning("警告", "リマインドを設定するタスクを選択してください")
+            return
+        
+        # 選択されたタスクを取得
+        item = selected_items[0]  # 最初の選択項目のみ処理
+        values = self.tree.item(item, 'values')
+        task_id = int(values[0])
+        task_title = values[1]
+        
+        # リマインド設定ダイアログ
+        reminder_window = tk.Toplevel(self.root)
+        reminder_window.title("リマインド設定")
+        reminder_window.geometry("300x200")
+        reminder_window.transient(self.root)
+        reminder_window.grab_set()
+        
+        # リマインド時間設定フレーム
+        frame = ttk.Frame(reminder_window, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+        
+        # ラベル
+        ttk.Label(frame, text=f"タスク: {task_title}").grid(row=0, column=0, columnspan=2, padx=5, pady=5, sticky=tk.W)
+        
+        # 時間設定
+        ttk.Label(frame, text="何分後にリマインドしますか？").grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky=tk.W)
+        
+        minutes_var = tk.IntVar(value=30)
+        minutes_options = [5, 10, 15, 30, 60]
+        minutes_combobox = ttk.Combobox(frame, textvariable=minutes_var, values=minutes_options, width=5)
+        minutes_combobox.grid(row=2, column=0, padx=5, pady=5, sticky=tk.W)
+        ttk.Label(frame, text="分後").grid(row=2, column=1, padx=5, pady=5, sticky=tk.W)
+        
+        # ボタン
+        def set_reminder_for_task():
+            minutes = minutes_var.get()
+            
+            # 現在時刻を取得
+            now = datetime.now()
+            
+            # リマインド時刻を計算
+            reminder_time = now + timedelta(minutes=minutes)
+            reminder_time_str = reminder_time.strftime('%Y-%m-%d %H:%M')
+            
+            # タスクのリマインド時刻を設定
+            for task in self.tasks:
+                if task['id'] == task_id:
+                    task['reminder'] = reminder_time_str
+                    break
+            
+            # 保存と表示の更新
+            self.save_tasks()
+            self.display_tasks()
+            
+            # 通知
+            notification_title = "リマインドが設定されました"
+            notification_message = f"タスク「{task_title}」のリマインドを{reminder_time_str}に設定しました。"
+            self.toaster.show_toast(notification_title, notification_message, duration=5, threaded=True)
+            
+            reminder_window.destroy()
+        
+        ttk.Button(frame, text="設定", command=set_reminder_for_task).grid(row=3, column=0, padx=5, pady=20)
+        ttk.Button(frame, text="キャンセル", command=reminder_window.destroy).grid(row=3, column=1, padx=5, pady=20)
+        
+    def check_reminders(self):
+        # 定期的にリマインドをチェック
+        while self.reminder_active:
+            current_time = datetime.now()
+            current_time_str = current_time.strftime('%Y-%m-%d %H:%M')
+            
+            # 全タスクをチェック
+            for task in self.tasks:
+                if task['status'] == 'active' and 'reminder' in task and task['reminder'] != '未設定':
+                    reminder_time = task['reminder']
+                    
+                    # 現在時刻がリマインド時刻と一致または過ぎた場合
+                    if current_time_str >= reminder_time:
+                        # 通知
+                        notification_title = "リマインド: タスクの時間です"
+                        notification_message = f"タスク「{task['title']}」の時間になりました。\nカテゴリ: {task['category']}\n優先度: {task['priority']}"
+                        self.toaster.show_toast(notification_title, notification_message, duration=10, threaded=True)
+                        
+                        # リマインドをリセット
+                        task['reminder'] = '未設定'
+                        self.save_tasks()
+                        
+                        # UIを更新（メインスレッドで実行）
+                        self.root.after(0, self.display_tasks)
+            
+            # 1分ごとにチェック
+            time.sleep(60)
 
 if __name__ == "__main__":
     root = tk.Tk()
