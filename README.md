@@ -36,3 +36,10 @@ Windows 向けに作成された、Python 製のシンプルなコマンドラ�
 ```bash
 git clone https://github.com/warabinbin/TodoApp.git
 cd TodoApp
+```
+
+### 2. 依存パッケージのインストール
+
+```bash
+pip install win10toast
+```
